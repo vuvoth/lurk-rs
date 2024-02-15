@@ -23,7 +23,7 @@ use tracing::info;
 use crate::{
     config::lurk_config,
     coprocessor::Coprocessor,
-    error::ProofError,
+    error::{ProofError, ReductionError},
     eval::lang::Lang,
     field::LurkField,
     lem::{interpreter::Frame, pointers::Ptr, store::Store},
@@ -290,10 +290,13 @@ impl<'a, F: CurveCycleEquipped, C: Coprocessor<F>> RecursiveSNARKTrait<F, C1LEM<
             recursive_snark_option
         };
 
-        Ok(Self::Recursive(
-            Box::new(recursive_snark_option.expect("RecursiveSNARK missing")),
-            PhantomData,
-        ))
+        let Some(recursive_snark) = recursive_snark_option else {
+            return Err(ProofError::Reduction(ReductionError::Misc(
+                "RecursiveSNARK missing".into(),
+            )));
+        };
+
+        Ok(Self::Recursive(Box::new(recursive_snark), PhantomData))
     }
 
     fn compress(self, pp: &PublicParams<F>) -> Result<Self, ProofError> {
