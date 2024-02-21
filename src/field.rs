@@ -36,6 +36,7 @@ use crate::tag::{ContTag, ExprTag, Op1, Op2};
 #[derive(Default, Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, ValueEnum)]
 #[cfg_attr(not(target_arch = "wasm32"), derive(Arbitrary))]
 #[cfg_attr(not(target_arch = "wasm32"), serde_test)]
+#[clap(rename_all = "lowercase")]
 pub enum LanguageField {
     /// The BN256 scalar field,
     #[default]
@@ -51,10 +52,10 @@ pub enum LanguageField {
 impl std::fmt::Display for LanguageField {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Pallas => write!(f, "Pallas"),
-            Self::Vesta => write!(f, "Vesta"),
-            Self::BN256 => write!(f, "BN256"),
-            Self::Grumpkin => write!(f, "Grumpkin"),
+            Self::Pallas => write!(f, "pallas"),
+            Self::Vesta => write!(f, "vesta"),
+            Self::BN256 => write!(f, "bn256"),
+            Self::Grumpkin => write!(f, "grumpkin"),
         }
     }
 }

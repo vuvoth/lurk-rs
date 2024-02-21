@@ -235,7 +235,7 @@ impl<'a, F: CurveCycleEquipped, C: Coprocessor<F>> RecursiveSNARKTrait<F, C1LEM<
         recursive_snark_option = if lurk_config(None, None)
             .perf
             .parallelism
-            .recursive_steps
+            .wit_gen_vs_folding
             .is_parallel()
         {
             let cc = steps
@@ -326,9 +326,8 @@ impl<'a, F: CurveCycleEquipped, C: Coprocessor<F>> RecursiveSNARKTrait<F, C1LEM<
     }
 }
 
-impl<'a, F: CurveCycleEquipped, C: Coprocessor<F>> Prover<'a, F, C1LEM<'a, F, C>>
-    for SuperNovaProver<'a, F, C>
-{
+impl<'a, F: CurveCycleEquipped, C: Coprocessor<F>> Prover<'a, F> for SuperNovaProver<'a, F, C> {
+    type Frame = C1LEM<'a, F, C>;
     type PublicParams = PublicParams<F>;
     type RecursiveSnark = Proof<F, C1LEM<'a, F, C>>;
 

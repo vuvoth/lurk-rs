@@ -205,7 +205,8 @@ pub fn public_params<'a, F: CurveCycleEquipped, C: Coprocessor<F> + 'a>(
         &circuit_secondary,
         &*commitment_size_hint1,
         &*commitment_size_hint2,
-    );
+    )
+    .unwrap();
     PublicParams {
         pp,
         pk_and_vk: OnceCell::new(),
@@ -290,7 +291,7 @@ impl<'a, F: CurveCycleEquipped, C: Coprocessor<F>> RecursiveSNARKTrait<F, C1LEM<
         recursive_snark_option = if lurk_config(None, None)
             .perf
             .parallelism
-            .recursive_steps
+            .wit_gen_vs_folding
             .is_parallel()
         {
             let cc = steps.into_iter().map(Mutex::new).collect::<Vec<_>>();
@@ -409,9 +410,8 @@ impl<'a, F: CurveCycleEquipped, C: Coprocessor<F> + 'a> NovaProver<'a, F, C> {
     }
 }
 
-impl<'a, F: CurveCycleEquipped, C: Coprocessor<F> + 'a> Prover<'a, F, C1LEM<'a, F, C>>
-    for NovaProver<'a, F, C>
-{
+impl<'a, F: CurveCycleEquipped, C: Coprocessor<F> + 'a> Prover<'a, F> for NovaProver<'a, F, C> {
+    type Frame = C1LEM<'a, F, C>;
     type PublicParams = PublicParams<F>;
     type RecursiveSnark = Proof<F, C1LEM<'a, F, C>>;
 

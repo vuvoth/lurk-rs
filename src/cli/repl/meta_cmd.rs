@@ -8,8 +8,9 @@ use std::{collections::HashMap, process};
 
 use crate::{
     cli::{
+        backend::Backend,
         field_data::{dump, load, HasFieldModulus},
-        lurk_proof::{LurkProof, LurkProofMeta},
+        lurk_proof::{LurkProof, LurkProofMeta, LurkProofWrapper},
         paths::proof_path,
         zstore::ZDag,
     },
@@ -24,11 +25,11 @@ use crate::{
     package::{Package, SymbolRef},
     proof::{
         nova::{self, CurveCycleEquipped, Dual, C1LEM},
-        RecursiveSNARKTrait,
+        supernova, RecursiveSNARKTrait,
     },
     public_parameters::{
         instance::{Instance, Kind},
-        public_params,
+        public_params, supernova_public_params,
     },
     tag::{ContTag, ExprTag},
 };
@@ -287,7 +288,8 @@ where
             "!(fetch 0x178217493faea2931df4e333837ba9312d0bb9f59bb787c1f40fd3af6d845001)",
         ],
         run: |repl, args, _path| {
-            let hash = *repl.get_comm_hash(args)?;
+            let hash_expr = repl.peek1(args)?;
+            let hash = *repl.get_comm_hash(hash_expr)?;
             repl.fetch(&hash, false)
         },
     };
@@ -302,7 +304,8 @@ where
             "!(open 0x178217493faea2931df4e333837ba9312d0bb9f59bb787c1f40fd3af6d845001)",
         ],
         run: |repl, args, _path| {
-            let hash = *repl.get_comm_hash(args)?;
+            let hash_expr = repl.peek1(args)?;
+            let hash = *repl.get_comm_hash(hash_expr)?;
             repl.fetch(&hash, true)
         },
     };
@@ -349,7 +352,7 @@ where
         ],
         example: &[
             "!(prove '(1 2 3))",
-            "!(verify \"Nova_BN256_10_048476fa5e4804639fe4ccfe73d43bf96da6183f670f0b08e4ac8c82bf8efa47\")",
+            "!(verify \"supernova_bn256_10_048476fa5e4804639fe4ccfe73d43bf96da6183f670f0b08e4ac8c82bf8efa47\")",
             "!(open 0x048476fa5e4804639fe4ccfe73d43bf96da6183f670f0b08e4ac8c82bf8efa47)",
         ],
         run: |repl, args, _path| {
@@ -368,7 +371,7 @@ where
         description: &["Verify proof key <string> and print the result."],
         example: &[
             "!(prove '(1 2 3))",
-            "!(verify \"Nova_BN256_10_048476fa5e4804639fe4ccfe73d43bf96da6183f670f0b08e4ac8c82bf8efa47\")",
+            "!(verify \"supernova_bn256_10_048476fa5e4804639fe4ccfe73d43bf96da6183f670f0b08e4ac8c82bf8efa47\")",
             "!(open 0x048476fa5e4804639fe4ccfe73d43bf96da6183f670f0b08e4ac8c82bf8efa47)",
         ],
         run: |repl, args, _path| {
@@ -520,21 +523,19 @@ where
     }
 
     fn call(repl: &mut Repl<F, C>, args: &Ptr, _path: &Utf8Path) -> Result<()> {
-        let (hash_ptr, args) = repl.store.car_cdr(args)?;
-        let hash_expr = match hash_ptr.tag() {
-            Tag::Expr(ExprTag::Cons) => hash_ptr,
-            _ => repl.store.list(vec![hash_ptr]),
-        };
-        let hash = *repl.get_comm_hash(&hash_expr)?;
+        let (hash_expr, args) = repl.store.car_cdr(args)?;
+        let hash = *repl.get_comm_hash(hash_expr)?;
+        // check if the data is already available on the store before trying to
+        // fetch it from the file system
         if repl.store.open(hash).is_none() {
             repl.fetch(&hash, false)?;
         }
         let open = repl.store.intern_lurk_symbol("open");
         let open_expr = repl.store.list(vec![open, repl.store.num(hash)]);
-        let Some((args_vec, _)) = repl.store.fetch_list(&args) else {
-            bail!("Data must have been interned");
-        };
-
+        let (args_vec, _) = repl
+            .store
+            .fetch_list(&args)
+            .expect("list of arguments must have been interned");
         let mut expr_vec = Vec::with_capacity(args_vec.len() + 1);
         expr_vec.push(open_expr);
         expr_vec.extend(args_vec);
@@ -609,7 +610,7 @@ where
         description: &[],
         example: &[
             "!(prove '(1 2 3))",
-            "!(inspect \"Nova_Pallas_10_002cd7baecd8e781d217cd1eb8b67d4f890005fd3763541e37ce49550bd9f4bf\")",
+            "!(inspect \"supernova_bn256_10_048476fa5e4804639fe4ccfe73d43bf96da6183f670f0b08e4ac8c82bf8efa47\")",
         ],
         run: |repl, args, _path| {
             Self::inspect(repl, args, false)
@@ -623,7 +624,7 @@ where
         description: &[],
         example: &[
             "!(prove '(1 2 3))",
-            "!(inspect-full \"Nova_Pallas_10_002cd7baecd8e781d217cd1eb8b67d4f890005fd3763541e37ce49550bd9f4bf\")",
+            "!(inspect-full \"supernova_bn256_10_048476fa5e4804639fe4ccfe73d43bf96da6183f670f0b08e4ac8c82bf8efa47\")",
         ],
         run: |repl, args, _path| {
             Self::inspect(repl, args, true)
@@ -686,6 +687,7 @@ where
             "  If this is not necessary, this component can simply be nil.",
             "",
             "defprotocol accepts the following options:",
+            "  :backend can be \"nova\" or \"supernova\", defaulting to the REPL's config",
             "  :rc is the reduction count, defaulting to the REPL's one",
             "  :lang defines the Lang (ignored for now)",
             "  :description is a description of the protocol, defaulting to \"\""
@@ -699,6 +701,7 @@ where
             "        (list6 (mk-open-expr hash) (empty-env) :outermost pair (empty-env) :terminal)",
             "        nil)",
             "      (lambda () (> (car pair) 10))))",
+            "  :backend \"supernova\"",
             "  :rc 10",
             "  :description \"example protocol\")",
         ],
@@ -729,12 +732,12 @@ where
                 )
             }
 
-            let prop_map = repl.get_properties(&props, &["rc", "lang", "description"])?;
+            let prop_map = repl.get_properties(&props, &["backend", "rc", "lang", "description"])?;
 
-            let get_prop = |key, accepts: fn(&Ptr) -> bool, def: fn(&Repl<F, C>) -> Ptr| -> Result<Ptr> {
+            let get_prop = |key, accepts: fn(&Repl<F, C>, &Ptr) -> bool, def: fn(&Repl<F, C>) -> Ptr| -> Result<Ptr> {
                 match prop_map.get(key) {
                     Some(val) => {
-                        if accepts(val) {
+                        if accepts(repl, val) {
                             Ok(*val)
                         } else {
                             bail!("Invalid value for {key}")
@@ -744,44 +747,64 @@ where
                 }
             };
 
+            let backend = get_prop(
+                "backend",
+                |repl, ptr| {
+                    let backend_str = repl.store.fetch_string(ptr);
+                    backend_str == Some("nova".to_string()) || backend_str == Some("supernova".to_string())
+                },
+                |repl| repl.store.intern_string(&repl.backend.to_string())
+            )?;
+
             let rc = get_prop(
                 "rc",
-                Ptr::is_num,
+                |_, ptr| ptr.is_num(),
                 |repl| repl.store.num_u64(repl.rc.try_into().unwrap())
             )?;
 
             // TODO: handle lang properly
             let lang = get_prop(
                 "lang",
-                |_| true, // accept anything for now
+                |_, _| true, // accept anything for now
                 |repl| repl.store.intern_nil()
             )?;
 
             let description = get_prop(
                 "description",
-                Ptr::is_str,
+                |_, ptr| ptr.is_str(),
                 |repl| repl.store.intern_string("")
             )?;
 
             // the standard format for a processed protocol as Lurk data
-            let protocol = repl.store.list(vec![fun, rc, lang, description]);
+            let protocol = repl.store.list(vec![fun, backend, rc, lang, description]);
             repl.env = repl.store.push_binding(name, protocol, repl.env);
             Ok(())
         },
     };
 
-    /// Returns the protocol function and reduction count
+    /// Returns the protocol function, the backend and reduction count
     ///
     /// # Errors
     /// * If the protocol evaluation fails
+    /// * If the backend is not a string or has invalid value
     /// * If the reduction count is not a number or can't be converted to `u64`
-    fn get_fun_and_rc(repl: &Repl<F, C>, ptcl: Ptr) -> Result<(Ptr, usize)> {
+    fn get_fun_backend_and_rc(repl: &Repl<F, C>, ptcl: Ptr) -> Result<(Ptr, Backend, usize)> {
         let (io, ..) = repl
             .eval_expr(ptcl)
             .with_context(|| "evaluating protocol")?;
         let ptcl = &io[0];
 
         let (fun, rest) = repl.store.car_cdr(ptcl)?;
+
+        let (car, rest) = repl.store.car_cdr(&rest)?;
+        let Some(backend) = repl.store.fetch_string(&car) else {
+            bail!("Backend must be a string")
+        };
+        let backend = match backend.as_str() {
+            "nova" => Backend::Nova,
+            "supernova" => Backend::SuperNova,
+            _ => bail!("Invalid value for backend"),
+        };
 
         let (car, _) = repl.store.car_cdr(&rest)?;
         let (Tag::Expr(ExprTag::Num), RawPtr::Atom(rc_idx)) = car.parts() else {
@@ -790,7 +813,7 @@ where
         let Some(rc) = repl.store.expect_f(*rc_idx).to_u64().map(|u| u as usize) else {
             bail!("Invalid value for reduction count")
         };
-        Ok((fun, rc))
+        Ok((fun, backend, rc))
     }
 
     /// Returns a vector containing the elements of a list.
@@ -914,7 +937,13 @@ where
 
             let path = get_path(repl, &path)?;
 
-            let (fun, proto_rc) = Self::get_fun_and_rc(repl, ptcl)?;
+            let (fun, backend, proto_rc) = Self::get_fun_backend_and_rc(repl, ptcl)?;
+            if backend != repl.backend {
+                bail!(
+                    "Protocol uses backend={backend} but the REPL was initialized with backend={}",
+                    repl.backend
+                )
+            }
 
             if proto_rc != repl.rc {
                 bail!(
@@ -964,13 +993,24 @@ where
             let mut z_dag = ZDag::default();
             let z_ptr = z_dag.populate_with(&args, &repl.store, &mut Default::default());
             let args = LurkData { z_ptr, z_dag };
-            match load::<LurkProof<'_, _, C>>(&proof_path(&proof_key))? {
-                LurkProof::Nova { proof, .. } => {
-                    dump(ProtocolProof::Nova { args, proof }, &path)?;
+            let LurkProof { proof, .. } = load::<LurkProof<'_, _, C>>(&proof_path(&proof_key))?;
+            match proof {
+                LurkProofWrapper::Nova(proof) => {
+                    assert_eq!(backend, Backend::Nova);
+                    assert_eq!(repl.backend, Backend::Nova);
+                    let proof = ProtocolProofWrapper::Nova(proof);
+                    dump(ProtocolProof { args, proof }, &path)?;
+                    println!("Protocol (Nova) proof saved at {path}");
+                }
+                LurkProofWrapper::SuperNova(proof) => {
+                    assert_eq!(backend, Backend::SuperNova);
+                    assert_eq!(repl.backend, Backend::SuperNova);
+                    let proof = ProtocolProofWrapper::SuperNova(proof);
+                    dump(ProtocolProof { args, proof }, &path)?;
                     println!("Protocol proof saved at {path}");
-                    Ok(())
                 }
             }
+            Ok(())
         },
     };
 
@@ -992,39 +1032,49 @@ where
 
             let path = get_path(repl, &path)?;
 
-            let (fun, proto_rc) = Self::get_fun_and_rc(repl, ptcl)?;
+            let (fun, backend, proto_rc) = Self::get_fun_backend_and_rc(repl, ptcl)?;
 
-            match load::<ProtocolProof<F, C1LEM<'a, F, C>>>(&path)? {
-                ProtocolProof::Nova {
-                    args: LurkData { z_ptr, z_dag },
-                    proof,
-                } => {
-                    let args =
-                        z_dag.populate_store(&z_ptr, &repl.store, &mut Default::default())?;
+            let ProtocolProof {
+                args: LurkData { z_ptr, z_dag },
+                proof,
+            } = load::<ProtocolProof<F, C1LEM<'a, F, C>>>(&path)?;
 
-                    let (mut cek_io, post_verify) =
-                        Self::get_cek_io_and_post_verify_fn(repl, fun, args)?;
+            let args = z_dag.populate_store(&z_ptr, &repl.store, &mut Default::default())?;
 
-                    cek_io[2] = Self::get_cont_ptr(repl, &cek_io[2])?; // cont-in
-                    cek_io[5] = Self::get_cont_ptr(repl, &cek_io[5])?; // cont-out
+            let (mut cek_io, post_verify) = Self::get_cek_io_and_post_verify_fn(repl, fun, args)?;
 
+            cek_io[2] = Self::get_cont_ptr(repl, &cek_io[2])?; // cont-in
+            cek_io[5] = Self::get_cont_ptr(repl, &cek_io[5])?; // cont-out
+
+            let public_inputs = repl.store.to_scalar_vector(&cek_io[..3]);
+            let public_outputs = repl.store.to_scalar_vector(&cek_io[3..]);
+
+            match proof {
+                ProtocolProofWrapper::Nova(proof) => {
+                    assert_eq!(backend, Backend::Nova);
                     let instance =
                         Instance::new(proto_rc, repl.lang.clone(), true, Kind::NovaPublicParams);
                     let pp = public_params(&instance)?;
 
-                    if !proof.verify(
-                        &pp,
-                        &repl.store.to_scalar_vector(&cek_io[..3]),
-                        &repl.store.to_scalar_vector(&cek_io[3..]),
-                    )? {
+                    if !proof.verify(&pp, &public_inputs, &public_outputs)? {
                         bail!("Proof verification failed")
                     }
+                }
+                ProtocolProofWrapper::SuperNova(proof) => {
+                    assert_eq!(backend, Backend::SuperNova);
+                    let instance =
+                        Instance::new(proto_rc, repl.lang.clone(), true, Kind::SuperNovaAuxParams);
+                    let pp = supernova_public_params(&instance)?;
 
-                    Self::post_verify_check(repl, post_verify)?;
-                    println!("Proof accepted by the protocol");
-                    Ok(())
+                    if !proof.verify(&pp, &public_inputs, &public_outputs)? {
+                        bail!("Proof verification failed")
+                    }
                 }
             }
+
+            Self::post_verify_check(repl, post_verify)?;
+            println!("Proof accepted by the protocol");
+            Ok(())
         },
     };
 
@@ -1093,16 +1143,22 @@ fn get_path<F: LurkField, C: Coprocessor<F> + Serialize + DeserializeOwned>(
     Ok(Utf8PathBuf::from(path))
 }
 
+#[non_exhaustive]
+#[derive(Serialize, Deserialize)]
+#[serde(bound(serialize = "F: Serialize", deserialize = "F: DeserializeOwned"))]
+enum ProtocolProofWrapper<F: CurveCycleEquipped, S> {
+    Nova(nova::Proof<F, S>),
+    SuperNova(supernova::Proof<F, S>),
+}
+
 /// Contains the data needed for proof validation (according to some protocol)
 /// and verification
 #[non_exhaustive]
 #[derive(Serialize, Deserialize)]
 #[serde(bound(serialize = "F: Serialize", deserialize = "F: DeserializeOwned"))]
-enum ProtocolProof<F: CurveCycleEquipped, S> {
-    Nova {
-        args: LurkData<F>,
-        proof: nova::Proof<F, S>,
-    },
+struct ProtocolProof<F: CurveCycleEquipped, S> {
+    args: LurkData<F>,
+    proof: ProtocolProofWrapper<F, S>,
 }
 
 impl<F: CurveCycleEquipped, S: StepCircuit<F>> HasFieldModulus for ProtocolProof<F, S> {

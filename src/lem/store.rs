@@ -23,7 +23,9 @@ use crate::{
         self, Binop, Binop2, Call, Call0, Call2, Dummy, Emit, If, Let, LetRec, Lookup, Outermost,
         Tail, Terminal, Unop,
     },
-    tag::ExprTag::{Char, Comm, Cons, Cproc, Env, Fun, Key, Nil, Num, Rec, Str, Sym, Thunk, U64},
+    tag::ExprTag::{
+        Char, Comm, Cons, Cproc, Env, Fun, Key, Nil, Num, Prov, Rec, Str, Sym, Thunk, U64,
+    },
 };
 
 use super::pointers::{Ptr, RawPtr, ZPtr};
@@ -65,6 +67,23 @@ pub struct Store<F: LurkField> {
     pub hash4zeros_idx: usize,
     pub hash6zeros_idx: usize,
     pub hash8zeros_idx: usize,
+}
+
+/// `WithStore` provides a distinct type for coupling a store with a value of another type.
+pub struct WithStore<'a, F: LurkField, T>(pub T, pub &'a Store<F>);
+
+impl<'a, F: LurkField, T> WithStore<'a, F, T> {
+    pub fn store(&self) -> &Store<F> {
+        self.1
+    }
+
+    pub fn inner(&self) -> &T {
+        &self.0
+    }
+
+    pub fn to_inner(self) -> T {
+        self.0
+    }
 }
 
 impl<F: LurkField> Default for Store<F> {
@@ -312,8 +331,15 @@ impl<F: LurkField> Store<F> {
     }
 
     #[inline]
-    pub fn fetch_f(&self, idx: usize) -> Option<&F> {
+    pub fn fetch_f_by_idx(&self, idx: usize) -> Option<&F> {
         self.f_elts.get_index(idx).map(|fw| &fw.0)
+    }
+
+    #[inline]
+    pub fn fetch_f(&self, ptr: &Ptr) -> Option<&F> {
+        ptr.raw()
+            .get_atom()
+            .and_then(|idx| self.fetch_f_by_idx(idx))
     }
 
     #[inline]
@@ -342,7 +368,7 @@ impl<F: LurkField> Store<F> {
 
     #[inline]
     pub fn expect_f(&self, idx: usize) -> &F {
-        self.fetch_f(idx).expect("Index missing from f_elts")
+        self.fetch_f_by_idx(idx).expect("Index missing from f_elts")
     }
 
     #[inline]
@@ -396,6 +422,35 @@ impl<F: LurkField> Store<F> {
     }
 
     #[inline]
+    pub fn intern_provenance(&self, query: Ptr, val: Ptr, deps: Ptr) -> Ptr {
+        assert_eq!(*query.tag(), Tag::Expr(Cons));
+        // TODO: Deps must be a single Prov or a list (later, an N-ary tuple), but we discard the type tag. This is
+        // arguably okay, but it means that in order to recover the preimage we will need to know the expected arity
+        // based on the query.
+        assert!(matches!(*deps.tag(), Tag::Expr(Prov | Cons | Nil)));
+        let raw = self.intern_raw_ptrs::<4>([
+            *query.raw(),
+            self.tag(*val.tag()),
+            *val.raw(),
+            *deps.raw(),
+        ]);
+        Ptr::new(Tag::Expr(Prov), raw)
+    }
+
+    #[inline]
+    pub fn deconstruct_provenance(&self, prov: Ptr) -> Option<[Ptr; 3]> {
+        assert_eq!(*prov.tag(), Tag::Expr(Prov));
+        let idx = prov.get_index2()?;
+        let [query_pay, val_tag, val_pay, deps_pay] = self.fetch_raw_ptrs::<4>(idx)?;
+        let val_tag = self.fetch_tag(val_tag)?;
+        let query = Ptr::new(Tag::Expr(Cons), *query_pay);
+        let val = Ptr::new(val_tag, *val_pay);
+
+        let deps = Ptr::new(Tag::Expr(Cons), *deps_pay);
+        Some([query, val, deps])
+    }
+
+    #[inline]
     pub fn intern_empty_env(&self) -> Ptr {
         self.intern_atom(Tag::Expr(Env), F::ZERO)
     }
@@ -403,6 +458,14 @@ impl<F: LurkField> Store<F> {
     #[inline]
     pub fn num(&self, f: F) -> Ptr {
         self.intern_atom(Tag::Expr(Num), f)
+    }
+
+    #[inline]
+    pub fn fetch_num(&self, ptr: &Ptr) -> Option<&F> {
+        match ptr.tag() {
+            Tag::Expr(Num) => self.fetch_f(ptr),
+            _ => None,
+        }
     }
 
     #[inline]
@@ -416,8 +479,24 @@ impl<F: LurkField> Store<F> {
     }
 
     #[inline]
+    pub fn fetch_u64(&self, ptr: &Ptr) -> Option<u64> {
+        match ptr.tag() {
+            Tag::Expr(U64) => self.fetch_f(ptr).and_then(F::to_u64),
+            _ => None,
+        }
+    }
+
+    #[inline]
     pub fn char(&self, c: char) -> Ptr {
         self.intern_atom(Tag::Expr(Char), F::from_char(c))
+    }
+
+    #[inline]
+    pub fn fetch_char(&self, ptr: &Ptr) -> Option<char> {
+        match ptr.tag() {
+            Tag::Expr(Char) => self.fetch_f(ptr).and_then(F::to_char),
+            _ => None,
+        }
     }
 
     #[inline]
@@ -437,7 +516,7 @@ impl<F: LurkField> Store<F> {
 
     pub fn is_zero(&self, ptr: &RawPtr) -> bool {
         match ptr {
-            RawPtr::Atom(idx) => self.fetch_f(*idx) == Some(&F::ZERO),
+            RawPtr::Atom(idx) => self.fetch_f_by_idx(*idx) == Some(&F::ZERO),
             _ => false,
         }
     }
@@ -480,7 +559,7 @@ impl<F: LurkField> Store<F> {
             loop {
                 match *ptr.raw() {
                     RawPtr::Atom(idx) => {
-                        if self.fetch_f(idx)? == &F::ZERO {
+                        if self.fetch_f_by_idx(idx)? == &F::ZERO {
                             self.ptr_string_cache.insert(ptr, string.clone());
                             return Some(string);
                         } else {
@@ -493,7 +572,7 @@ impl<F: LurkField> Store<F> {
                         assert_eq!(*cdr_tag, self.tag(Tag::Expr(Str)));
                         match car {
                             RawPtr::Atom(idx) => {
-                                let f = self.fetch_f(*idx)?;
+                                let f = self.fetch_f_by_idx(*idx)?;
                                 string.push(f.to_char().expect("malformed char pointer"));
                                 ptr = Ptr::new(Tag::Expr(Str), *cdr)
                             }
@@ -539,10 +618,11 @@ impl<F: LurkField> Store<F> {
             assert_eq!(*car_tag, self.tag(Tag::Expr(Str)));
             assert_eq!(*cdr_tag, self.tag(Tag::Expr(Sym)));
             let string = self.fetch_string(&Ptr::new(Tag::Expr(Str), *car))?;
+
             path.push(string);
             match cdr {
                 RawPtr::Atom(idx) => {
-                    if self.fetch_f(*idx)? == &F::ZERO {
+                    if self.fetch_f_by_idx(*idx)? == &F::ZERO {
                         path.reverse();
                         return Some(path);
                     } else {
@@ -561,7 +641,7 @@ impl<F: LurkField> Store<F> {
         } else {
             match (ptr.tag(), ptr.raw()) {
                 (Tag::Expr(Sym), RawPtr::Atom(idx)) => {
-                    if self.fetch_f(*idx)? == &F::ZERO {
+                    if self.fetch_f_by_idx(*idx)? == &F::ZERO {
                         let sym = Symbol::root_sym();
                         self.ptr_symbol_cache.insert(*ptr, Box::new(sym.clone()));
                         Some(sym)
@@ -570,7 +650,7 @@ impl<F: LurkField> Store<F> {
                     }
                 }
                 (Tag::Expr(Key), RawPtr::Atom(idx)) => {
-                    if self.fetch_f(*idx)? == &F::ZERO {
+                    if self.fetch_f_by_idx(*idx)? == &F::ZERO {
                         let key = Symbol::root_key();
                         self.ptr_symbol_cache.insert(*ptr, Box::new(key.clone()));
                         Some(key)
@@ -809,6 +889,29 @@ impl<F: LurkField> Store<F> {
         Some(list)
     }
 
+    /// Fetches a provenance
+    pub fn fetch_provenance(&self, ptr: &Ptr) -> Option<(Ptr, Ptr, Ptr)> {
+        if *ptr.tag() != Tag::Expr(Prov) {
+            return None;
+        }
+
+        let idx = ptr.raw().get_hash4()?;
+        self.fetch_raw_ptrs(idx)
+            .and_then(|[query_pay, val_tag, val_pay, deps_pay]| {
+                let query = Ptr::new(Tag::Expr(Cons), *query_pay);
+                let val = self.raw_to_ptr(val_tag, val_pay)?;
+
+                let nil = self.intern_nil();
+                let deps = if deps_pay == nil.raw() {
+                    nil
+                } else {
+                    Ptr::new(Tag::Expr(Prov), *deps_pay)
+                };
+
+                Some((query, val, deps))
+            })
+    }
+
     pub fn intern_syntax(&self, syn: Syntax<F>) -> Ptr {
         match syn {
             Syntax::Num(_, x) => self.num(x.into_scalar()),
@@ -1044,188 +1147,182 @@ impl Ptr {
         match self.tag() {
             Tag::Expr(t) => match t {
                 Nil => {
-                    if let Some(sym) = store.fetch_symbol(self) {
-                        state.fmt_to_string(&sym.into())
-                    } else {
-                        "<Opaque Nil>".into()
-                    }
+                    let Some(sym) = store.fetch_symbol(self) else {
+                        return "<Opaque Nil>".into();
+                    };
+                    state.fmt_to_string(&sym.into())
                 }
                 Sym => {
-                    if let Some(sym) = store.fetch_sym(self) {
-                        state.fmt_to_string(&sym.into())
-                    } else {
-                        "<Opaque Sym>".into()
-                    }
+                    let Some(sym) = store.fetch_sym(self) else {
+                        return "<Opaque Sym>".into();
+                    };
+                    state.fmt_to_string(&sym.into())
                 }
                 Key => {
-                    if let Some(key) = store.fetch_key(self) {
-                        state.fmt_to_string(&key.into())
-                    } else {
-                        "<Opaque Key>".into()
-                    }
+                    let Some(key) = store.fetch_key(self) else {
+                        return "<Opaque Key>".into();
+                    };
+                    state.fmt_to_string(&key.into())
                 }
                 Str => {
-                    if let Some(str) = store.fetch_string(self) {
-                        format!("\"{str}\"")
-                    } else {
-                        "<Opaque Str>".into()
-                    }
+                    let Some(str) = store.fetch_string(self) else {
+                        return "<Opaque Str>".into();
+                    };
+                    format!("\"{str}\"")
                 }
                 Char => {
-                    if let Some(c) = self
-                        .raw()
-                        .get_atom()
-                        .map(|idx| store.expect_f(idx))
-                        .and_then(F::to_char)
-                    {
+                    if let Some(c) = store.fetch_f(self).and_then(F::to_char) {
                         format!("\'{c}\'")
                     } else {
                         "<Malformed Char>".into()
                     }
                 }
                 Cons => {
-                    if let Some((list, non_nil)) = store.fetch_list(self) {
-                        let list = list
-                            .iter()
-                            .map(|p| p.fmt_to_string(store, state))
-                            .collect::<Vec<_>>();
-                        if let Some(non_nil) = non_nil {
-                            format!(
-                                "({} . {})",
-                                list.join(" "),
-                                non_nil.fmt_to_string(store, state)
-                            )
-                        } else {
-                            format!("({})", list.join(" "))
-                        }
-                    } else {
-                        "<Opaque Cons>".into()
-                    }
+                    let Some((list, non_nil)) = store.fetch_list(self) else {
+                        return "<Opaque Cons>".into();
+                    };
+                    let list = list
+                        .iter()
+                        .map(|p| p.fmt_to_string(store, state))
+                        .collect::<Vec<_>>();
+                    let Some(non_nil) = non_nil else {
+                        return format!("({})", list.join(" "));
+                    };
+                    format!(
+                        "({} . {})",
+                        list.join(" "),
+                        non_nil.fmt_to_string(store, state)
+                    )
                 }
                 Num => {
-                    if let Some(f) = self.raw().get_atom().map(|idx| store.expect_f(idx)) {
-                        if let Some(u) = f.to_u64() {
-                            u.to_string()
-                        } else {
-                            format!("0x{}", f.hex_digits())
-                        }
-                    } else {
-                        "<Malformed Num>".into()
-                    }
+                    let Some(f) = store.fetch_f(self) else {
+                        return "<Malformed Num>".into();
+                    };
+                    let Some(u) = f.to_u64() else {
+                        return format!("0x{}", f.hex_digits());
+                    };
+                    u.to_string()
                 }
                 U64 => {
-                    if let Some(u) = self
-                        .raw()
-                        .get_atom()
-                        .map(|idx| store.expect_f(idx))
-                        .and_then(F::to_u64)
-                    {
+                    if let Some(u) = store.fetch_f(self).and_then(F::to_u64) {
                         format!("{u}u64")
                     } else {
                         "<Malformed U64>".into()
                     }
                 }
-                Fun => match self.raw().get_hash8() {
-                    None => "<Malformed Fun>".into(),
-                    Some(idx) => {
-                        if let Some([vars, body, _, _]) = fetch_ptrs!(store, 4, idx) {
-                            match vars.tag() {
-                                Tag::Expr(Nil) => {
-                                    format!("<FUNCTION () {}>", body.fmt_to_string(store, state))
-                                }
-                                Tag::Expr(Cons) => {
-                                    format!(
-                                        "<FUNCTION {} {}>",
-                                        vars.fmt_to_string(store, state),
-                                        body.fmt_to_string(store, state)
-                                    )
-                                }
-                                _ => "<Malformed Fun>".into(),
-                            }
-                        } else {
-                            "<Opaque Fun>".into()
+                Fun => {
+                    let Some(idx) = self.raw().get_hash8() else {
+                        return "<Malformed Fun>".into();
+                    };
+                    let Some([vars, body, _, _]) = fetch_ptrs!(store, 4, idx) else {
+                        return "<Opaque Fun>".into();
+                    };
+                    match vars.tag() {
+                        Tag::Expr(Nil) => {
+                            format!("<FUNCTION () {}>", body.fmt_to_string(store, state))
                         }
-                    }
-                },
-                Rec => match self.raw().get_hash8() {
-                    None => "<Malformed Rec>".into(),
-                    Some(idx) => {
-                        if let Some([vars, body, _, _]) = fetch_ptrs!(store, 4, idx) {
-                            match vars.tag() {
-                                Tag::Expr(Nil) => {
-                                    format!(
-                                        "<REC_FUNCTION () {}>",
-                                        body.fmt_to_string(store, state)
-                                    )
-                                }
-                                Tag::Expr(Cons) => {
-                                    format!(
-                                        "<REC_FUNCTION {} {}>",
-                                        vars.fmt_to_string(store, state),
-                                        body.fmt_to_string(store, state)
-                                    )
-                                }
-                                _ => "<Malformed Rec>".into(),
-                            }
-                        } else {
-                            "<Opaque Rec>".into()
-                        }
-                    }
-                },
-                Thunk => match self.raw().get_hash4() {
-                    None => "<Malformed Thunk>".into(),
-                    Some(idx) => {
-                        if let Some([val, cont]) = fetch_ptrs!(store, 2, idx) {
+                        Tag::Expr(Cons) => {
                             format!(
-                                "Thunk{{ value: {} => cont: {} }}",
-                                val.fmt_to_string(store, state),
-                                cont.fmt_to_string(store, state)
+                                "<FUNCTION {} {}>",
+                                vars.fmt_to_string(store, state),
+                                body.fmt_to_string(store, state)
                             )
-                        } else {
-                            "<Opaque Thunk>".into()
                         }
+                        _ => "<Malformed Fun>".into(),
                     }
-                },
-                Comm => match self.raw().get_atom() {
-                    Some(idx) => {
-                        let f = store.expect_f(idx);
-                        if store.comms.get(&FWrap(*f)).is_some() {
-                            format!("(comm 0x{})", f.hex_digits())
-                        } else {
-                            format!("<Opaque Comm 0x{}>", f.hex_digits())
+                }
+                Rec => {
+                    let Some(idx) = self.raw().get_hash8() else {
+                        return "<Malformed Rec>".into();
+                    };
+                    let Some([vars, body, _, _]) = fetch_ptrs!(store, 4, idx) else {
+                        return "<Opaque Rec>".into();
+                    };
+                    match vars.tag() {
+                        Tag::Expr(Nil) => {
+                            format!("<REC_FUNCTION () {}>", body.fmt_to_string(store, state))
                         }
-                    }
-                    None => "<Malformed Comm>".into(),
-                },
-                Cproc => match self.raw().get_hash4() {
-                    None => "<Malformed Cproc>".into(),
-                    Some(idx) => {
-                        if let Some([cproc_name, args]) = fetch_ptrs!(store, 2, idx) {
+                        Tag::Expr(Cons) => {
                             format!(
-                                "<COPROC {} {}>",
-                                cproc_name.fmt_to_string(store, state),
-                                args.fmt_to_string(store, state)
+                                "<REC_FUNCTION {} {}>",
+                                vars.fmt_to_string(store, state),
+                                body.fmt_to_string(store, state)
                             )
-                        } else {
-                            "<Opaque Cproc>".into()
                         }
+                        _ => "<Malformed Rec>".into(),
                     }
-                },
-                Env => {
-                    if let Some(env) = store.fetch_env(self) {
-                        let list = env
-                            .iter()
-                            .map(|(sym, val)| {
-                                format!(
-                                    "({} . {})",
-                                    sym.fmt_to_string(store, state),
-                                    val.fmt_to_string(store, state)
-                                )
-                            })
-                            .collect::<Vec<_>>();
-                        format!("<ENV ({})>", list.join(" "))
+                }
+                Thunk => {
+                    let Some(idx) = self.raw().get_hash4() else {
+                        return "<Malformed Thunk>".into();
+                    };
+                    let Some([val, cont]) = fetch_ptrs!(store, 2, idx) else {
+                        return "<Opaque Thunk>".into();
+                    };
+                    format!(
+                        "Thunk{{ value: {} => cont: {} }}",
+                        val.fmt_to_string(store, state),
+                        cont.fmt_to_string(store, state)
+                    )
+                }
+                Comm => {
+                    let Some(idx) = self.raw().get_atom() else {
+                        return "<Malformed Comm>".into();
+                    };
+                    let f = store.expect_f(idx);
+                    if store.comms.get(&FWrap(*f)).is_some() {
+                        format!("(comm 0x{})", f.hex_digits())
                     } else {
-                        "<Opaque Env>".into()
+                        format!("<Opaque Comm 0x{}>", f.hex_digits())
+                    }
+                }
+                Cproc => {
+                    let Some(idx) = self.raw().get_hash4() else {
+                        return "<Malformed Cproc>".into();
+                    };
+                    let Some([cproc_name, args]) = fetch_ptrs!(store, 2, idx) else {
+                        return "<Opaque Cproc>".into();
+                    };
+                    format!(
+                        "<COPROC {} {}>",
+                        cproc_name.fmt_to_string(store, state),
+                        args.fmt_to_string(store, state)
+                    )
+                }
+                Env => {
+                    let Some(env) = store.fetch_env(self) else {
+                        return "<Opaque Env>".into();
+                    };
+                    let list = env
+                        .iter()
+                        .map(|(sym, val)| {
+                            format!(
+                                "({} . {})",
+                                sym.fmt_to_string(store, state),
+                                val.fmt_to_string(store, state)
+                            )
+                        })
+                        .collect::<Vec<_>>();
+                    format!("<ENV ({})>", list.join(" "))
+                }
+                Prov => {
+                    let Some((query, val, deps)) = store.fetch_provenance(self) else {
+                        return "<Opaque Prov>".into();
+                    };
+                    let nil = store.intern_nil();
+                    if store.ptr_eq(&deps, &nil) {
+                        format!(
+                            "<Prov ({} . {})>",
+                            query.fmt_to_string(store, state),
+                            val.fmt_to_string(store, state),
+                        )
+                    } else {
+                        format!(
+                            "<Prov ({} . {}) . {}>",
+                            query.fmt_to_string(store, state),
+                            val.fmt_to_string(store, state),
+                            deps.fmt_to_string(store, state)
+                        )
                     }
                 }
             },
@@ -1280,19 +1377,18 @@ impl Ptr {
         store: &Store<F>,
         state: &State,
     ) -> String {
-        match self.raw().get_hash8() {
-            None => format!("<Malformed {name}>"),
-            Some(idx) => {
-                if let Some([a, cont, _, _]) = fetch_ptrs!(store, 4, idx) {
-                    format!(
-                        "{name}{{ {field}: {}, continuation: {} }}",
-                        a.fmt_to_string(store, state),
-                        cont.fmt_to_string(store, state)
-                    )
-                } else {
-                    format!("<Opaque {name}>")
-                }
-            }
+        {
+            let Some(idx) = self.raw().get_hash8() else {
+                return format!("<Malformed {name}>");
+            };
+            let Some([a, cont, _, _]) = fetch_ptrs!(store, 4, idx) else {
+                return format!("<Opaque {name}>");
+            };
+            format!(
+                "{name}{{ {field}: {}, continuation: {} }}",
+                a.fmt_to_string(store, state),
+                cont.fmt_to_string(store, state)
+            )
         }
     }
 
@@ -1303,21 +1399,20 @@ impl Ptr {
         store: &Store<F>,
         state: &State,
     ) -> String {
-        match self.raw().get_hash8() {
-            None => format!("<Malformed {name}>"),
-            Some(idx) => {
-                if let Some([a, b, cont, _]) = fetch_ptrs!(store, 4, idx) {
-                    let (fa, fb) = fields;
-                    format!(
-                        "{name}{{ {fa}: {}, {fb}: {}, continuation: {} }}",
-                        a.fmt_to_string(store, state),
-                        b.fmt_to_string(store, state),
-                        cont.fmt_to_string(store, state)
-                    )
-                } else {
-                    format!("<Opaque {name}>")
-                }
-            }
+        {
+            let Some(idx) = self.raw().get_hash8() else {
+                return format!("<Malformed {name}>");
+            };
+            let Some([a, b, cont, _]) = fetch_ptrs!(store, 4, idx) else {
+                return format!("<Opaque {name}>");
+            };
+            let (fa, fb) = fields;
+            format!(
+                "{name}{{ {fa}: {}, {fb}: {}, continuation: {} }}",
+                a.fmt_to_string(store, state),
+                b.fmt_to_string(store, state),
+                cont.fmt_to_string(store, state)
+            )
         }
     }
 
@@ -1328,22 +1423,21 @@ impl Ptr {
         store: &Store<F>,
         state: &State,
     ) -> String {
-        match self.raw().get_hash8() {
-            None => format!("<Malformed {name}>"),
-            Some(idx) => {
-                if let Some([a, b, c, cont]) = fetch_ptrs!(store, 4, idx) {
-                    let (fa, fb, fc) = fields;
-                    format!(
-                        "{name}{{ {fa}: {}, {fb}: {}, {fc}: {}, continuation: {} }}",
-                        a.fmt_to_string(store, state),
-                        b.fmt_to_string(store, state),
-                        c.fmt_to_string(store, state),
-                        cont.fmt_to_string(store, state)
-                    )
-                } else {
-                    format!("<Opaque {name}>")
-                }
-            }
+        {
+            let Some(idx) = self.raw().get_hash8() else {
+                return format!("<Malformed {name}>");
+            };
+            let Some([a, b, c, cont]) = fetch_ptrs!(store, 4, idx) else {
+                return format!("<Opaque {name}>");
+            };
+            let (fa, fb, fc) = fields;
+            format!(
+                "{name}{{ {fa}: {}, {fb}: {}, {fc}: {}, continuation: {} }}",
+                a.fmt_to_string(store, state),
+                b.fmt_to_string(store, state),
+                c.fmt_to_string(store, state),
+                cont.fmt_to_string(store, state)
+            )
         }
     }
 }

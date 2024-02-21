@@ -35,12 +35,10 @@ fn synthesize_sha256<F: LurkField, CS: ConstraintSystem<F>>(
     };
 
     for ptr in ptrs {
-        let tag_bits = ptr
-            .tag()
-            .to_bits_le_strict(&mut cs.namespace(|| "preimage_tag_bits"))?;
+        let tag_bits = ptr.tag().to_bits_le_strict(ns!(cs, "preimage_tag_bits"))?;
         let hash_bits = ptr
             .hash()
-            .to_bits_le_strict(&mut cs.namespace(|| "preimage_hash_bits"))?;
+            .to_bits_le_strict(ns!(cs, "preimage_hash_bits"))?;
 
         bits.extend(tag_bits);
         pad_to_next_len_multiple_of_8(&mut bits);
@@ -57,7 +55,7 @@ fn synthesize_sha256<F: LurkField, CS: ConstraintSystem<F>>(
     // Fine to lose the last <1 bit of precision.
     let digest_scalar = pack_bits(cs.namespace(|| "digest_scalar"), &digest_bits)?;
     AllocatedPtr::alloc_tag(
-        &mut cs.namespace(|| "output_expr"),
+        ns!(cs, "output_expr"),
         ExprTag::Num.to_field(),
         digest_scalar,
     )
@@ -79,11 +77,13 @@ fn compute_sha256<F: LurkField, T: Tag>(n: usize, z_ptrs: &[ZPtr<T, F>]) -> F {
 
     hasher.update(input);
     let mut bytes = hasher.finalize();
-    bytes.reverse();
-    let l = bytes.len();
-    // Discard the two most significant bits.
-    bytes[l - 1] &= 0b00111111;
 
+    // The pack_bits gadget used by the synthesize_sha256 function
+    // sets the n most significant bits of the hash output to zero,
+    // where n is 256 minus the field's capacity. We do the same
+    // here to match the output.
+    discard_bits::<F>(&mut bytes);
+    bytes.reverse();
     F::from_bytes(&bytes).unwrap()
 }
 
@@ -126,6 +126,20 @@ impl<F: LurkField> Sha256Coprocessor<F> {
             n,
             _p: Default::default(),
         }
+    }
+}
+
+// Retains the Scalar::CAPACITY last bits of a big-endian input
+fn discard_bits<Scalar: LurkField>(bytes: &mut [u8]) {
+    let bits_to_zero = 256 - Scalar::CAPACITY as usize;
+    let full_bytes_to_zero = bits_to_zero / 8;
+    let partial_bits_to_zero = bits_to_zero % 8;
+
+    bytes[..full_bytes_to_zero].iter_mut().for_each(|b| *b = 0);
+
+    if partial_bits_to_zero > 0 {
+        let mask = 0xFF >> partial_bits_to_zero;
+        bytes[full_bytes_to_zero] &= mask;
     }
 }
 
